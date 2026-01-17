@@ -1,4 +1,4 @@
-%%writefile app.py
+app.py
 import os, csv, io, json, re
 from datetime import datetime
 from itertools import product
