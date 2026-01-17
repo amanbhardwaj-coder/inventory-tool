@@ -1,13 +1,4 @@
-# app.py
-# ==========================================================
-# INVENTORY EXPANDER (NO LLM)
-# - Clean CSV + expand variants
-# - Pricing rules (only if Price column exists + price_rules.adjustments present)
-# - Image URL rules (only if Image URL columns not present + image_rules enabled)
-# - SKU shortening (optional via sku_rules)
-# - Output columns grouped: Base + Available side-by-side
-# ==========================================================
-
+app.py
 import os, csv, io, json, re, argparse
 from datetime import datetime
 from itertools import product
