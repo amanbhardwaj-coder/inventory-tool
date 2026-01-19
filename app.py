@@ -1,3 +1,14 @@
+
+# app.py
+# ==========================================================
+# INVENTORY EXPANDER (NO LLM)
+# - Clean CSV + expand variants
+# - Pricing rules (only if Price column exists + price_rules.adjustments present)
+# - Image URL rules (only if Image URL columns not present + image_rules enabled)
+# - SKU shortening (optional via sku_rules)
+# - Output columns grouped: Base + Available side-by-side
+# ==========================================================
+
 import os, csv, io, json, re, argparse
 from datetime import datetime
 from itertools import product
@@ -588,14 +599,6 @@ def expand_inventory(csv_text: str, rules: Optional[Dict[str, Any]] = None) -> T
 
     stock_col_name = next((c for c in cols if _h(c) in {_h("Stock Number"), _h("SKU")}), "Stock Number")
 
-    # Safe accessor for rows which may be shorter than header length
-    def _safe_row_get(row: List[Any], idx: int) -> str:
-        if idx < 0:
-            return ""
-        if idx < len(row) and row[idx] is not None:
-            return str(row[idx]).strip()
-        return ""
-
     # variation flags: commas mean multiple tokens
     v_flags = []
     for i in range(len(cols)):
@@ -609,21 +612,14 @@ def expand_inventory(csv_text: str, rules: Optional[Dict[str, Any]] = None) -> T
     stock_out_h = "Stock Number"
 
     for i, row in enumerate(rows):
-        master_val = _safe_row_get(row, master_idx)
+        master_val = str(row[master_idx] or "").strip()
         if not master_val:
             master_val = f"MASTER-{i+1:03}"
 
-        base_price_value = _safe_row_get(row, price_idx) if has_price_column else None
+        base_price_value = row[price_idx] if has_price_column and price_idx < len(row) else None
 
-        original_title = _safe_row_get(row, cols.index("Short Title")) if "Short Title" in cols and cols.index("Short Title") < len(cols) else ""
-        if "Short Title" in cols:
-            st_idx = cols.index("Short Title")
-            original_title = _safe_row_get(row, st_idx)
-
-        original_desc = ""
-        if "Description" in cols:
-            d_idx = cols.index("Description")
-            original_desc = _safe_row_get(row, d_idx)
+        original_title = str(row[cols.index("Short Title")] or "").strip() if "Short Title" in cols else ""
+        original_desc  = str(row[cols.index("Description")] or "").strip() if "Description" in cols else ""
 
         exp_meta = []
         for idx in range(len(cols)):
@@ -631,7 +627,7 @@ def expand_inventory(csv_text: str, rules: Optional[Dict[str, Any]] = None) -> T
             if (col_name or "").strip().lower() in SKIP_EXPANSION_COLS:
                 continue
 
-            raw_val = _safe_row_get(row, idx)
+            raw_val = str(row[idx] or "")
             raw_val_norm = raw_val.replace("#", ",")
             tokens = [x.strip() for x in raw_val_norm.split(",") if x.strip()] or [""]
 
@@ -659,13 +655,10 @@ def expand_inventory(csv_text: str, rules: Optional[Dict[str, Any]] = None) -> T
                 opts = [x.strip() for x in str(meta["orig"] or "").split(",") if x.strip()]
                 all_options_by_key[key] = [_pretty_value(key, o) for o in opts]
 
-        # Iterate all combinations of tokens for varying columns
         for combo in product(*[x["tokens"] for x in exp_meta]):
             new_r: Dict[str, str] = {}
-
-            # Initialize with original values safely (may be shorter rows)
-            for idx_c, c in enumerate(cols):
-                new_r[c] = _safe_row_get(row, idx_c)
+            for idx, c in enumerate(cols):
+                new_r[c] = str(row[idx] or "").strip()
 
             new_r[master_out_h] = master_val
 
@@ -857,3 +850,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
