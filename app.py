@@ -785,7 +785,7 @@ def run_streamlit_app():
         raise RuntimeError("Streamlit is not installed. Run: pip install streamlit")
 
     st.set_page_config(page_title="Inventory Expander", layout="wide")
-    st.title("Inventory Expander (No LLM)")
+    st.title("Jewelry Builder")
 
     # Load rules once
     if "rules" not in st.session_state:
