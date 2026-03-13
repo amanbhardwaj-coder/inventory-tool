@@ -7,6 +7,12 @@
 # - SKU shortening (optional via sku_rules + enabled)
 # - Output columns grouped: Base + Available side-by-side (handles plural)
 # - Streamlit: toggles + JSON rules editor + save button
+#
+# FIXES INCLUDED:
+# - Prevents free-text columns like Notes / Description 1.00ct from being
+#   treated as variant columns just because they contain commas.
+# - Adds a centralized should_skip_expansion() helper.
+# - Makes title fallback a little safer when Short Title is missing.
 # ==========================================================
 
 import os, csv, io, json, re, argparse
@@ -131,7 +137,7 @@ def smart_parse(txt: str) -> Dict[str, Any]:
     try:
         dialect = csv.Sniffer().sniff(text[:2000], delimiters=",\t;|")
         delim = dialect.delimiter
-    except:
+    except Exception:
         delim = ","
     reader = csv.reader(f, delimiter=delim)
     rows = [r for r in reader if any((c or "").strip() for c in r)]
@@ -219,7 +225,7 @@ def _fmt_ct(val: str) -> str:
     try:
         n = float(s)
         return f"{n:.2f}ct"
-    except:
+    except Exception:
         return s
 
 def _canon_key(label: str) -> str:
@@ -248,6 +254,46 @@ def _pretty_value(key: str, val: str) -> str:
     if "center" in k or "carat" in k or "ct" in k:
         return _fmt_ct(v)
     return v
+
+# ==========================================================
+# 5B. EXPANSION CONTROL
+# ==========================================================
+NON_EXPANDABLE_EXACT = {
+    "short title",
+    "description",
+    "price",
+    "notes",
+    "total varients",
+    "total variants",
+    "image url 1",
+    "image url 2",
+    "image url 3",
+    "image url 4",
+    "image_url_1",
+    "image_url_2",
+    "image_url_3",
+    "image_url_4",
+}
+
+NON_EXPANDABLE_PREFIXES = [
+    "description ",
+]
+
+def should_skip_expansion(col_name: str) -> bool:
+    c = (col_name or "").strip().lower()
+    if c in NON_EXPANDABLE_EXACT:
+        return True
+    return any(c.startswith(prefix) for prefix in NON_EXPANDABLE_PREFIXES)
+
+def split_variant_tokens(raw_val: Any) -> List[str]:
+    """
+    Split only when a column is actually allowed to expand.
+    Commas are treated as separators here because the caller uses this only
+    for variant-capable columns.
+    """
+    raw = str(raw_val or "")
+    raw = raw.replace("#", ",")
+    return [x.strip() for x in raw.split(",") if x.strip()] or [""]
 
 # ==========================================================
 # 6. TITLE/DESCRIPTION
@@ -332,7 +378,7 @@ def _to_float(x: Any, default: float = 0.0) -> float:
     s = re.sub(r"[^0-9.\-]", "", s)
     try:
         return float(s)
-    except:
+    except Exception:
         return default
 
 def price_rules_enabled(rules: Dict[str, Any]) -> bool:
@@ -485,30 +531,18 @@ def shorten_sku(master_stock: str, parts: Dict[str, str], rules: Dict[str, Any])
 # 10. OUTPUT COLUMN ORDER (Base + Available side-by-side, plural-aware)
 # ==========================================================
 def _singularize_guess(s: str) -> str:
-    """
-    Very lightweight singularization for pairing:
-    - shapes -> shape
-    - metals -> metal
-    - sizes -> size
-    - stones -> stone
-    Doesn't attempt full English; just enough for common inventory headings.
-    """
     t = (s or "").strip()
     low = t.lower().strip()
 
     if low.endswith("ies") and len(low) > 3:
         return t[:-3] + "y"
     if low.endswith("ses") and len(low) > 3:
-        return t[:-2]  # e.g., "Sizes" won't hit here; "Classes" would.
+        return t[:-2]
     if low.endswith("s") and not low.endswith("ss") and len(low) > 2:
         return t[:-1]
     return t
 
 def _pair_base_for_available(avail_col: str, all_keys: set) -> Optional[str]:
-    """
-    Given 'Available Shapes', tries to find best base:
-      'Shape' or 'Shapes' existing in keys.
-    """
     base_raw = _strip_available(avail_col).strip()
     candidates = [
         base_raw,
@@ -551,7 +585,6 @@ def build_ordered_headers(final_rows: List[Dict[str, str]],
     def is_avail(k: str) -> bool:
         return str(k).strip().lower().startswith("available ")
 
-    # Preserve original ordering, but pair base+available
     for c in original_cols:
         if c in priority:
             continue
@@ -566,30 +599,25 @@ def build_ordered_headers(final_rows: List[Dict[str, str]],
             add_col(c_str)
             continue
 
-        # if base has an available partner (plural-aware), add partner next
         add_col(c_str)
 
-        # try exact partner
         partner_exact = f"Available {c_str}"
         if partner_exact in all_keys:
             add_col(partner_exact)
             continue
 
-        # try plural partner: Available + plural(base)
         if not c_str.lower().endswith("s"):
             partner_plural = f"Available {c_str}s"
             if partner_plural in all_keys:
                 add_col(partner_plural)
                 continue
 
-        # try singular partner if base is plural
         sing = _singularize_guess(c_str)
         if sing != c_str:
             partner_sing = f"Available {sing}"
             if partner_sing in all_keys:
                 add_col(partner_sing)
 
-    # add remaining
     for k in sorted(all_keys):
         add_col(k)
 
@@ -602,14 +630,13 @@ def apply_ui_overrides(rules: Dict[str, Any],
                        enable_sku: bool,
                        enable_images: bool,
                        enable_pricing: bool) -> Dict[str, Any]:
-    r = json.loads(json.dumps(rules or {}))  # deep copy via json
+    r = json.loads(json.dumps(rules or {}))
     r.setdefault("sku_rules", {})
     r.setdefault("image_rules", {})
     r.setdefault("price_rules", {})
 
     r["sku_rules"]["enabled"] = bool(enable_sku)
     r["image_rules"]["enabled"] = bool(enable_images)
-    # pricing is enabled/disabled by toggle, but compute still also requires adjustments
     r["price_rules"]["_ui_enabled"] = bool(enable_pricing)
     return r
 
@@ -628,13 +655,6 @@ def expand_inventory(csv_text: str,
     if not rows:
         return "", {"error": "No rows found."}
 
-    SKIP_EXPANSION_COLS = {
-        "short title", "description",
-        "price",
-        "image url 1", "image url 2", "image url 3", "image url 4",
-        "image_url_1", "image_url_2", "image_url_3", "image_url_4"
-    }
-
     def _h(s: str) -> str:
         return _norm(s or "")
 
@@ -651,13 +671,22 @@ def expand_inventory(csv_text: str,
     include_images = (img_cols_present or ((not img_cols_present) and image_rules_enabled(rules)))
 
     stock_col_name = next((c for c in cols if _h(c) in {_h("Stock Number"), _h("SKU")}), "Stock Number")
+    short_title_col_name = next((c for c in cols if _h(c) == _h("Short Title")), None)
 
+    # Decide which columns truly vary
     v_flags = []
     for i in range(len(cols)):
-        if (cols[i] or "").strip().lower() in SKIP_EXPANSION_COLS:
+        col_name = cols[i]
+        if should_skip_expansion(col_name):
             v_flags.append(False)
         else:
-            v_flags.append(any(len(str(r[i]).split(",")) > 1 for r in rows if i < len(r) and r[i]))
+            v_flags.append(
+                any(
+                    len(split_variant_tokens(r[i])) > 1
+                    for r in rows
+                    if i < len(r) and r[i]
+                )
+            )
 
     final_rows: List[Dict[str, str]] = []
     master_out_h = "Master stock"
@@ -669,22 +698,25 @@ def expand_inventory(csv_text: str,
             master_val = f"MASTER-{i+1:03}"
 
         base_price_value = row[price_idx] if has_price_column and price_idx < len(row) else None
-        original_title = str(row[cols.index("Short Title")] or "").strip() if "Short Title" in cols else ""
+
+        original_title = ""
+        if short_title_col_name and short_title_col_name in cols:
+            original_title = str(row[cols.index(short_title_col_name)] or "").strip()
 
         exp_meta = []
         for idx in range(len(cols)):
             col_name = cols[idx]
-            if (col_name or "").strip().lower() in SKIP_EXPANSION_COLS:
+
+            if should_skip_expansion(col_name):
                 continue
 
             raw_val = str(row[idx] or "")
-            raw_val_norm = raw_val.replace("#", ",")
-            tokens = [x.strip() for x in raw_val_norm.split(",") if x.strip()] or [""]
+            tokens = split_variant_tokens(raw_val)
 
             exp_meta.append({
                 "col": col_name,
                 "tokens": tokens,
-                "orig": raw_val_norm,
+                "orig": raw_val.replace("#", ","),
                 "varies": v_flags[idx],
                 "is_available": is_available_col(col_name),
                 "available_base": available_base_name(col_name) if is_available_col(col_name) else "",
@@ -695,7 +727,10 @@ def expand_inventory(csv_text: str,
         for meta in exp_meta:
             if meta["varies"]:
                 varying_options.extend([x.strip() for x in str(meta["orig"] or "").split(",") if x.strip()])
-        style_name_base = infer_style_name_from_title(original_title, varying_options) or original_title or master_val
+
+        style_name_base = infer_style_name_from_title(original_title, varying_options)
+        if not style_name_base:
+            style_name_base = original_title or master_val
 
         all_options_by_key: Dict[str, List[str]] = {}
         for meta in exp_meta:
@@ -731,30 +766,25 @@ def expand_inventory(csv_text: str,
                     key = _canon_key(out_col)
                     parts[key] = _pretty_value(key, token)
 
-            # Stock Number
             existing_sku = str(new_r.get(stock_col_name, "")).strip()
             if existing_sku:
                 new_r[stock_out_h] = existing_sku
             else:
                 new_r[stock_out_h] = shorten_sku(master_val, parts, rules) if sku_rules_enabled(rules) else master_val
 
-            # Titles
             new_r["Short Title"] = build_variant_short_title(original_title, style_name_base, parts, all_options_by_key)
             new_r["Description"] = build_variant_description(style_name_base, parts, all_options_by_key, original_title)
 
-            # Normalize Available*
             for k in list(new_r.keys()):
                 if str(k).strip().lower().startswith("available "):
                     new_r[k] = normalize_list(str(new_r[k] or "").replace("#", ","))
 
-            # Price: ONLY if CSV has Price column AND UI toggle enabled
             if has_price_column:
                 if bool(rules.get("price_rules", {}).get("_ui_enabled", True)) and price_rules_enabled(rules):
                     new_r["Price"] = compute_variant_price(base_price_value, parts, rules)
                 else:
                     new_r["Price"] = str(base_price_value or "").strip()
 
-            # Images: ONLY if not present in input AND toggle enabled + rules enabled
             if (not img_cols_present) and image_rules_enabled(rules):
                 img_map = generate_image_urls(master_stock=master_val, parts=parts, rules=rules)
                 for k, v in img_map.items():
@@ -787,7 +817,6 @@ def run_streamlit_app():
     st.set_page_config(page_title="Inventory Expander", layout="wide")
     st.title("Jewelry Builder")
 
-    # Load rules once
     if "rules" not in st.session_state:
         st.session_state["rules"] = load_rules()
 
@@ -799,7 +828,6 @@ def run_streamlit_app():
     st.sidebar.divider()
     st.sidebar.header("Rules Editor (JSON)")
 
-    # JSON editor
     rules_text = st.sidebar.text_area(
         "Edit normalization_rules.json",
         value=json.dumps(st.session_state["rules"], indent=2),
@@ -839,10 +867,8 @@ def run_streamlit_app():
         st.stop()
 
     raw = up.read().decode("utf-8", errors="ignore")
-
     rules = st.session_state["rules"]
 
-    # Clean step (shows unknown headers)
     c = clean_input_csv(raw, rules)
     st.subheader("Header Cleaning Diff")
     st.write("Unknown columns (not mapped):", c["diff"].get("unknown_columns", []))
