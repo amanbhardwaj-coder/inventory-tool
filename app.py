@@ -258,32 +258,37 @@ def _pretty_value(key: str, val: str) -> str:
 # ==========================================================
 # 5B. EXPANSION CONTROL
 # ==========================================================
-NON_EXPANDABLE_EXACT = {
-    "short title",
+NON_EXPANDABLE_EXACT_NORM = {
+    "masterstock",
+    "stocknumber",
+    "sku",
+    "shorttitle",
     "description",
     "price",
     "notes",
-    "total varients",
-    "total variants",
-    "image url 1",
-    "image url 2",
-    "image url 3",
-    "image url 4",
-    "image_url_1",
-    "image_url_2",
-    "image_url_3",
-    "image_url_4",
+    "totalvarients",
+    "totalvariants",
 }
 
-NON_EXPANDABLE_PREFIXES = [
-    "description ",
+NON_EXPANDABLE_PREFIXES_NORM = [
+    "description",
+    "imageurl",
 ]
 
+def _strip_duplicate_header_suffix(col_name: str) -> str:
+    return re.sub(r"\s*\(\d+\)\s*$", "", (col_name or "").strip())
+
 def should_skip_expansion(col_name: str) -> bool:
-    c = (col_name or "").strip().lower()
-    if c in NON_EXPANDABLE_EXACT:
+    base_name = _strip_duplicate_header_suffix(col_name)
+
+    # Any explicit "Available ..." column is variant-capable by design.
+    if is_available_col(base_name):
+        return False
+
+    c = _norm(base_name)
+    if c in NON_EXPANDABLE_EXACT_NORM:
         return True
-    return any(c.startswith(prefix) for prefix in NON_EXPANDABLE_PREFIXES)
+    return any(c.startswith(prefix) for prefix in NON_EXPANDABLE_PREFIXES_NORM)
 
 def split_variant_tokens(raw_val: Any) -> List[str]:
     """
